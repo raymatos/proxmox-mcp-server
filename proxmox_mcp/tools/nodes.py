@@ -292,6 +292,52 @@ TOOLS = [
         },
     },
     {
+        "name": "refresh_node_apt_index",
+        "description": (
+            "Refresh the APT package index on a node (the API equivalent of 'apt-get update'). "
+            "Returns a task UPID — poll it with get_task_status. Run this before "
+            "get_node_apt_update so the pending-package list is not stale. This only refreshes "
+            "the index; it does NOT install anything (the Proxmox API has no dist-upgrade "
+            "endpoint)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": NODE,
+                "notify": {
+                    "type": "boolean",
+                    "description": "Email the configured address if new updates are found (default false)",
+                },
+                "quiet": {
+                    "type": "boolean",
+                    "description": "Suppress the notification for no-op refreshes (default false)",
+                },
+            },
+            "required": ["node"],
+        },
+    },
+    {
+        "name": "get_node_apt_versions",
+        "description": "Get installed versions of Proxmox-relevant packages on a node (pveversion -v).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {"node": NODE},
+            "required": ["node"],
+        },
+    },
+    {
+        "name": "get_node_apt_repositories",
+        "description": (
+            "Get the APT repository configuration for a node, including which repos are enabled "
+            "and any warnings (e.g. enterprise repo enabled without a subscription)."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"node": NODE},
+            "required": ["node"],
+        },
+    },
+    {
         "name": "get_node_apt_changelog",
         "description": "Get changelog for an APT package on a node.",
         "inputSchema": {
@@ -524,6 +570,20 @@ async def handle(name: str, args: dict[str, Any], client: ProxmoxClient) -> Any:
 
     elif name == "get_node_apt_update":
         return await client.get(f"/nodes/{node}/apt/update")
+
+    elif name == "refresh_node_apt_index":
+        data = {}
+        if args.get("notify"):
+            data["notify"] = 1
+        if args.get("quiet"):
+            data["quiet"] = 1
+        return await client.post(f"/nodes/{node}/apt/update", data or None)
+
+    elif name == "get_node_apt_versions":
+        return await client.get(f"/nodes/{node}/apt/versions")
+
+    elif name == "get_node_apt_repositories":
+        return await client.get(f"/nodes/{node}/apt/repositories")
 
     elif name == "get_node_apt_changelog":
         params = {"name": args["name"]}

@@ -2,9 +2,16 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from typing import Any
 
 from ..client import ProxmoxClient
+
+_CONSOLE_TARGET_FILE = Path(
+    os.getenv("PROXMOX_CONSOLE_TARGET", Path.home() / ".config/proxmox-mcp/console-target.json")
+)
 
 NODE = {"type": "string", "description": "Node name (e.g. pve01)"}
 VMID = {"type": "integer", "description": "VM ID"}
@@ -541,16 +548,46 @@ TOOLS = [
     # --- Agent ---
     {
         "name": "vm_agent_exec",
-        "description": "Execute a command inside a VM via QEMU guest agent.",
+        "description": (
+            "Execute a command inside a VM via QEMU guest agent. Returns a pid — poll it with "
+            "vm_agent_exec_status to get the output. The guest agent does NOT run a shell, so "
+            "pass the command as an argv array. For pipes or redirection, invoke a shell "
+            'explicitly: ["cmd.exe", "/c", "netstat -ano | findstr LISTENING"] on Windows, '
+            'or ["/bin/sh", "-c", "..."] on Linux.'
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
                 "node": NODE,
                 "vmid": VMID,
-                "command": OPT_STR("Command to execute"),
+                "command": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        'Command and arguments as an array, e.g. ["cmd.exe", "/c", "dir"]. '
+                        "A bare string is accepted but is treated as a single executable path "
+                        "with no arguments."
+                    ),
+                },
                 "input-data": OPT_STR("Stdin data for the command"),
             },
             "required": ["node", "vmid", "command"],
+        },
+    },
+    {
+        "name": "vm_agent_exec_status",
+        "description": (
+            "Get the status and output of a command started with vm_agent_exec. Returns "
+            "'exited', 'exitcode', 'out-data' and 'err-data'. Poll until 'exited' is true."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "node": NODE,
+                "vmid": VMID,
+                "pid": {"type": "integer", "description": "PID returned by vm_agent_exec"},
+            },
+            "required": ["node", "vmid", "pid"],
         },
     },
     {
@@ -620,6 +657,26 @@ TOOLS = [
         },
     },
     # --- VNC / Console ---
+    {
+        "name": "set_console_target",
+        "description": (
+            "Point the local VNC bridge at a VM, so the vnc-console MCP's screenshot/click/type "
+            "tools act on that VM. Records this server's own Proxmox connection, so calling it "
+            "on proxmox-cbg01 targets a cluster VM, on proxmox-ai01 an ai01 VM, and so on. "
+            "Takes effect on the bridge's next connection; an in-flight VNC session keeps its "
+            "old target until it reconnects."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {"node": NODE, "vmid": VMID},
+            "required": ["node", "vmid"],
+        },
+    },
+    {
+        "name": "get_console_target",
+        "description": "Show which VM the local VNC bridge is currently pointed at.",
+        "inputSchema": {"type": "object", "properties": {}},
+    },
     {
         "name": "get_vm_vnc_proxy",
         "description": "Get a VNC proxy ticket for a VM console.",
@@ -841,10 +898,15 @@ async def handle(name: str, args: dict[str, Any], client: ProxmoxClient) -> Any:
         return await client.get(f"{vm}/rrddata", params)
 
     elif name == "vm_agent_exec":
+        # The API takes argv as a repeated 'command' field; httpx encodes a list that way.
+        # A bare string stays a single argv[0] (the agent does not split it).
         data = {"command": args["command"]}
         if "input-data" in args:
             data["input-data"] = args["input-data"]
         return await client.post(f"{vm}/agent/exec", data)
+
+    elif name == "vm_agent_exec_status":
+        return await client.get(f"{vm}/agent/exec-status", {"pid": args["pid"]})
 
     elif name == "vm_agent_get_fsinfo":
         return await client.get(f"{vm}/agent/get-fsinfo")
@@ -869,6 +931,31 @@ async def handle(name: str, args: dict[str, Any], client: ProxmoxClient) -> Any:
         if "snapname" in args:
             params["snapname"] = args["snapname"]
         return await client.get(f"{vm}/feature", params)
+
+    elif name == "set_console_target":
+        # Record the env file this server was started with, so the bridge can reach whichever
+        # node/cluster this instance talks to.
+        env_file = os.getenv("PROXMOX_ENV_FILE") or str(
+            Path(__file__).resolve().parent.parent.parent / ".env"
+        )
+        target = {"env": env_file, "node": args["node"], "vmid": int(args["vmid"])}
+        # Confirm the VM exists before pointing the bridge at it.
+        info = (await client.get(f"{vm}/status/current"))["data"]
+        _CONSOLE_TARGET_FILE.parent.mkdir(parents=True, exist_ok=True)
+        _CONSOLE_TARGET_FILE.write_text(json.dumps(target, indent=2))
+        return {
+            "data": {
+                **target,
+                "name": info.get("name"),
+                "status": info.get("status"),
+                "note": "connect a VNC client to the bridge (default 127.0.0.1:5901)",
+            }
+        }
+
+    elif name == "get_console_target":
+        if not _CONSOLE_TARGET_FILE.exists():
+            return {"data": None, "note": "no console target set yet"}
+        return {"data": json.loads(_CONSOLE_TARGET_FILE.read_text())}
 
     elif name == "get_vm_vnc_proxy":
         data = {k: args[k] for k in ("websocket", "generate-password") if k in args}

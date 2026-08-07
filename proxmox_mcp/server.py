@@ -16,10 +16,19 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import sys
+from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
+
+# Must run before importing .client, which reads the env vars at module level.
+# PROXMOX_ENV_FILE lets one checkout serve several nodes: each MCP entry points at
+# its own env file, so credentials stay out of the MCP client config. Falls back to
+# a .env beside the package (explicit path — the server's cwd is not predictable).
+load_dotenv(os.getenv("PROXMOX_ENV_FILE") or Path(__file__).resolve().parent.parent / ".env")
+
 from mcp.server import Server
 from mcp.types import TextContent, Tool
 import mcp.server.stdio
@@ -40,8 +49,6 @@ from .tools import (
     sdn,
     storage,
 )
-
-load_dotenv()
 
 # --- Build unified tool registry ---
 
