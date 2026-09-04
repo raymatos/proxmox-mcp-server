@@ -31,6 +31,36 @@ def _validate_config() -> None:
         sys.exit(1)
 
 
+def _proxmox_value(value: Any) -> Any:
+    """Convert a single value to the form the Proxmox API accepts.
+
+    httpx renders Python ``True``/``False`` as the strings ``"true"``/``"false"``
+    in both form bodies and query strings, but Proxmox's ``-boolean`` type only
+    accepts ``1``/``0`` and rejects anything else with a 400. Booleans are checked
+    before any int handling because ``isinstance(True, int)`` is also true.
+    """
+    if isinstance(value, bool):
+        return 1 if value else 0
+    if isinstance(value, list):
+        return [_proxmox_value(item) for item in value]
+    return value
+
+
+def _proxmox_params(
+    data: Optional[dict[str, Any]],
+) -> Optional[dict[str, Any]]:
+    """Serialize an outgoing parameter dict for the Proxmox API.
+
+    Applied at this single choke point so every tool benefits: ~168 boolean
+    parameters are declared across the tool modules, and each one used to fail
+    with a 400 (proven by elimination on clone_vm(full=) and
+    migrate_vm(with-local-disks=), which succeed with the boolean removed).
+    """
+    if not data:
+        return data
+    return {key: _proxmox_value(value) for key, value in data.items()}
+
+
 class ProxmoxClient:
     def __init__(self) -> None:
         self.base_url = f"https://{PROXMOX_HOST}:{PROXMOX_PORT}/api2/json"
@@ -73,6 +103,7 @@ class ProxmoxClient:
     ) -> Any:
         url = f"{self.base_url}{path}"
         headers = self._headers(method)
+        data = _proxmox_params(data)
         if method == "GET":
             response = await self.client.get(url, headers=headers, params=data)
         elif method == "POST":
